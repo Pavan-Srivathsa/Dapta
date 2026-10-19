@@ -28,6 +28,7 @@ ACCESS_CODE = re.compile(
 )
 MAX_MESSAGE_CHARS = 500_000
 MAX_WORKFLOW_CHARS = 20_000
+MIN_WORKFLOW_CHARS = 3  # matches the controller's RouteRequest.workflow min_length
 COMPARISON_POLL_SECONDS = 180
 COMPARISON_POLL_INTERVAL = 1.5
 CONDITION_LABELS = {
@@ -137,6 +138,11 @@ class LoraFactoryOrchestrator:
             )
         if len(routing_workflow) > MAX_WORKFLOW_CHARS:
             return "The workflow description must be no more than 20,000 characters."
+        if len(routing_workflow) < MIN_WORKFLOW_CHARS:
+            return (
+                "There is no categorized action awaiting confirmation. "
+                "Describe a workflow (at least 3 characters) or say `help`."
+            )
 
         decision = self.client.route_workflow(routing_workflow)
         category = str(decision.get("decision") or "unsupported")

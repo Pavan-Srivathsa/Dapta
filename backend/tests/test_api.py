@@ -68,6 +68,13 @@ class ApiTests(unittest.TestCase):
                     {tool["name"] for tool in tools},
                     {"list_adapters", "run_comparison", "create_adapter", "get_job_status"},
                 )
+                directory = client.get("/v1/directory", headers=headers).json()
+                self.assertEqual(directory["integrated_base_model"], "Qwen/Qwen3-VL-8B-Instruct")
+                integrated_entry = next(
+                    entry for entry in directory["base_models"]
+                    if entry["model_id"] == "Qwen/Qwen3-VL-8B-Instruct"
+                )
+                self.assertIn("nda-intake/qwen3-vl-8b-v1", integrated_entry["adapter_ids"])
 
     def test_agent_training_requires_the_access_file_and_stays_small(self):
         with tempfile.TemporaryDirectory() as directory:

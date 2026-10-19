@@ -34,6 +34,7 @@ from .jobs import (
     JobStore,
 )
 from .ledger import UsageLedger
+from .model_directory import directory_snapshot
 from .observability import capture_exception, initialize_sentry, span
 from .openrouter import FactoryAgents, OpenRouterClient
 from .routing import WorkflowRouter
@@ -237,6 +238,10 @@ def create_app(database_path: Path | str | None = None) -> FastAPI:
     @app.get("/v1/benchmarks", dependencies=protected)
     def list_v1_benchmarks() -> list[dict[str, Any]]:
         return comparison_store.list_benchmarks()
+
+    @app.get("/v1/directory", dependencies=protected)
+    def get_model_directory() -> dict[str, Any]:
+        return directory_snapshot(store.list_adapters())
 
     @app.get("/v1/agent/tools", dependencies=protected)
     def list_agent_tools() -> list[dict[str, Any]]:

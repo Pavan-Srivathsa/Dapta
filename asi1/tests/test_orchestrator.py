@@ -336,6 +336,21 @@ class OrchestratorTests(unittest.TestCase):
         self.assertIn("disabled", reply[0])
         self.assertFalse(any(call[0] == "create" for call in self.client.calls))
 
+    def test_short_reply_after_disabled_build_does_not_round_trip_to_controller(self):
+        orchestrator = LoraFactoryOrchestrator(
+            self.client,
+            self.sessions,
+            factory_builds_enabled=False,
+        )
+        orchestrator.handle("agent1", "Create a LoRA adapter for receipt extraction")
+        orchestrator.handle("agent1", "confirm")
+        calls_before = len(self.client.calls)
+
+        reply = orchestrator.handle("agent1", "ok")
+
+        self.assertEqual(len(self.client.calls), calls_before)
+        self.assertIn("no categorized action", reply[0])
+
     def test_wrong_access_code_never_prepares_or_routes_build(self):
         reply = self.orchestrator.handle(
             "agent1",
