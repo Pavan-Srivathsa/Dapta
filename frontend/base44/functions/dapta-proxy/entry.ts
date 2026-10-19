@@ -59,8 +59,8 @@ const ndaBenchmark = {
 
 export default async function (request: Request): Promise<Response> {
   const base44 = createClientFromRequest(request);
-  const user = await base44.auth.me();
-  if (!user) return Response.json({ detail: "Authentication required" }, { status: 401 });
+  const user = await signedInUser(base44);
+  if (!user) return Response.json({ detail: "Sign in to use Dapta" }, { status: 401 });
 
   const payload = (await request.json()) as RequestPayload;
   const method = payload.method || "GET";
@@ -116,6 +116,19 @@ function traceHeaders(trace: RequestPayload["trace"], incoming: Headers): Record
     ? rawBaggage.split(",").map((member) => member.trim()).filter((member) => BAGGAGE_MEMBER.test(member)).join(",")
     : "";
   return baggage ? { "sentry-trace": sentryTrace, baggage } : { "sentry-trace": sentryTrace };
+}
+
+// The site is public, so visitors may not be signed in. auth.me() rejects with an HTTP 401 for
+// them instead of returning null; uncaught, that crashed the function with a 500.
+async function signedInUser(base44: any): Promise<unknown> {
+  try {
+    return await base44.auth.me();
+  } catch (error) {
+    const status = (error as { response?: { status?: number }; status?: number }).response?.status
+      ?? (error as { status?: number }).status;
+    if (status === 401 || status === 403) return null;
+    throw error;
+  }
 }
 
 function registryFallback(path: string, method: string): unknown | undefined {

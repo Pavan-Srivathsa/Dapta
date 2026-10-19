@@ -5,7 +5,7 @@ import {
   Database, FileText, Layers3, Loader2, PackageCheck, Plus, Router,
   ShieldCheck, Sparkles, Upload, UploadCloud, Wrench, X, ChevronDown,
 } from "lucide-react";
-import { api } from "./api";
+import { api, SignInRequiredError, signIn } from "./api";
 import { Conversation, AdapterDrawer } from "./Conversation";
 import { ModelOutput } from "./ModelOutput";
 import { PollCoordinator, type PollTelemetry } from "./polling";
@@ -98,6 +98,7 @@ export default function App() {
   const [suggestedAdapter, setSuggestedAdapter] = useState<Adapter>();
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [error, setError] = useState<string>();
+  const [needsSignIn, setNeedsSignIn] = useState(false);
   const polls = useRef(new PollCoordinator());
   const knownStages = useRef(new Map<string, string>());
   const closeLibrary = useCallback(() => setLibraryOpen(false), []);
@@ -121,16 +122,19 @@ export default function App() {
     setError(undefined);
   }, recordPoll), []);
 
-  useEffect(() => { refresh().catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load saved work")); }, [refresh]);
+  // A signed-out visitor sees the sign-in screen; nothing polls or redirects until they choose to sign in.
+  const fail = useCallback((reason: unknown, fallback: string) => {
+    if (reason instanceof SignInRequiredError) setNeedsSignIn(true);
+    else setError(reason instanceof Error ? reason.message : fallback);
+  }, []);
+  useEffect(() => { refresh().catch((reason) => fail(reason, "Could not load saved work")); }, [refresh, fail]);
   useEffect(() => {
     const active = runs.some((run) => !["completed", "failed"].includes(run.status))
       || jobs.some((job) => !["ready", "failed", "cancelled"].includes(job.status));
     if (!active) return;
-    const timer = window.setInterval(() => refresh().catch((reason) => {
-      setError(reason instanceof Error ? reason.message : "Live updates temporarily failed");
-    }), 1500);
+    const timer = window.setInterval(() => refresh().catch((reason) => fail(reason, "Live updates temporarily failed")), 1500);
     return () => window.clearInterval(timer);
-  }, [runs, jobs, refresh]);
+  }, [runs, jobs, refresh, fail]);
   useEffect(() => {
     for (const job of jobs) {
       const previous = knownStages.current.get(job.job_id);
@@ -155,6 +159,9 @@ export default function App() {
     const stopped = await api.cancelJob(jobId);
     setJobs((current) => current.map((item) => item.job_id === jobId ? stopped : item));
     Sentry.addBreadcrumb({ category: "dapta.factory", message: "stop_requested", data: { job_id: jobId, status: stopped.status } });
+  }
+  if (needsSignIn) {
+    return <main className="recover-screen sign-in-screen"><div><strong>Sign in to use Dapta</strong><p>Dapta runs your workflows on a private backend. Sign in with your Base44 account to continue.</p><button onClick={signIn}>Sign in</button></div></main>;
   }
   return <div className="app-shell">
     <header className="topbar">

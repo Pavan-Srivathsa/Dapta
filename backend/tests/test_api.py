@@ -57,7 +57,10 @@ class ApiTests(unittest.TestCase):
                 self.assertEqual(client.get("/v1/adapters").status_code, 401)
                 headers = {"X-Dapta-Token": "controller-test-token"}
                 adapters = client.get("/v1/adapters", headers=headers).json()
-                self.assertEqual(adapters[0]["adapter_id"], "nda-intake/qwen3-vl-8b-v1")
+                by_id = {item["adapter_id"]: item for item in adapters}
+                self.assertIn("nda-intake/qwen3-vl-8b-v1", by_id)
+                receipt = by_id["receipt-to-expense/qwen3-vl-8b-cord-v1"]
+                self.assertTrue(receipt["metadata"]["accepts_image"])
                 benchmarks = client.get("/v1/benchmarks", headers=headers).json()
                 self.assertEqual(benchmarks[0]["test_documents"], 83)
                 tools = client.get("/v1/agent/tools", headers=headers).json()

@@ -68,3 +68,11 @@ test("keeps POST bodies, idempotency keys and authentication unchanged", async (
   assert.equal(unauthenticated.status, 401);
   assert.equal(calls.length, 1, "no controller call without a Base44 user");
 });
+
+test("a visitor who is not signed in gets a 401, not a crashed function", async () => {
+  (globalThis as any).__base44User = null;
+  const response = await invoke({ path: "/v1/adapters" });
+  assert.equal(response.status, 401);
+  assert.match((await response.json()).detail, /sign in/i);
+  assert.equal(calls.length, 0, "the controller is never called without a signed-in user");
+});

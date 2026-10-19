@@ -560,7 +560,57 @@ def _validate_candidates(candidates: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _register_skill_adapter(
+    store: JobStore,
+    *,
+    adapter_id: str,
+    skill_id: str,
+    skill_file: str,
+    artifact_uri: str,
+    metadata: dict[str, Any],
+) -> None:
+    skill_path = Path(__file__).parent / "skills" / skill_file
+    skill_prompt = skill_path.read_text(encoding="utf-8").strip()
+    record = {
+        **metadata,
+        "skill_prompt": skill_prompt,
+        "skill_path": f"backend/dapta/skills/{skill_file}",
+        "skill_sha256": hashlib.sha256(skill_prompt.encode("utf-8")).hexdigest(),
+    }
+    try:
+        existing = store.get_adapter(adapter_id)
+    except JobNotFound:
+        store.register_adapter(
+            adapter_id=adapter_id,
+            skill_id=skill_id,
+            version="v1",
+            base_model="Qwen/Qwen3-VL-8B-Instruct",
+            artifact_uri=artifact_uri,
+            metadata=record,
+        )
+    else:
+        store.update_adapter(
+            adapter_id=adapter_id,
+            artifact_uri=str(existing["artifact_uri"]),
+            metadata={**dict(existing.get("metadata") or {}), **record},
+        )
+
+
 def _seed_demo_data(store: JobStore, comparisons: ComparisonStore) -> None:
+    _register_skill_adapter(
+        store,
+        adapter_id="receipt-to-expense/qwen3-vl-8b-cord-v1",
+        skill_id="receipt-to-expense",
+        skill_file="receipt-cord-extractor/SKILL.md",
+        artifact_uri="hf://adityave/dapta-lora-adapters/receipt-to-expense/qwen3-vl-8b-cord-v1",
+        metadata={
+            "name": "Receipt extractor",
+            "description": "One receipt image to CORD JSON. Imported LoRA, not a frozen DAPTA benchmark.",
+            "keywords": ["receipt", "expense", "cord", "invoice", "image"],
+            "accepts_image": True,
+            "status": "ready",
+        },
+    )
     adapter_id = "nda-intake/qwen3-vl-8b-v1"
     skill_path = Path(__file__).parent / "skills" / "nda-intake" / "SKILL.md"
     skill_prompt = skill_path.read_text(encoding="utf-8").strip()

@@ -276,6 +276,25 @@ class WorkerOnVllmTests(unittest.TestCase):
                     self.assertTrue(fake.sleeping)
                     self.assertEqual(client.post("/admin/load", headers=auth).json()["model_loaded"], True)
                     self.assertFalse(fake.sleeping)
+                    from PIL import Image
+
+                    image = Image.new("RGB", (4, 4), "white")
+                    receipt = {
+                        "run_id": "r2",
+                        "workflow": "Extract receipt fields",
+                        "document_text": "[attached receipt image]",
+                        "adapter_id": "receipt-to-expense/qwen3-vl-8b-cord-v1",
+                        "image_url": "https://storage.example.test/receipt.jpg",
+                    }
+                    with patch.object(model_server, "load_receipt_image", return_value=image), \
+                            patch.object(model_server, "_validated_https_url", side_effect=lambda url: url):
+                        self.assertEqual(
+                            client.post("/generate", json=receipt, headers=auth).status_code, 200
+                        )
+                    chat = next(body for verb, path, body in fake.requests if path == "/v1/chat/completions" and body and "image_url" in json.dumps(body))
+                    embedded = chat["messages"][0]["content"][0]["image_url"]["url"]
+                    self.assertTrue(embedded.startswith("data:image/jpeg;base64,"))
+                    self.assertNotIn("storage.example.test", embedded)
         finally:
             fake.close()
             temp.cleanup()

@@ -21,10 +21,25 @@ async function invokeProxy<T>(payload: Record<string, unknown>): Promise<T> {
       const response = await base44.functions.invoke("dapta-proxy", trace ? { ...payload, trace } : payload);
       return response.data as T;
     } catch (reason) {
-      const error = reason as { response?: { data?: { detail?: string } }; message?: string };
+      const error = reason as { response?: { status?: number; data?: { detail?: string } }; message?: string };
+      if (error.response?.status === 401) throw new SignInRequiredError();
       throw new Error(error.response?.data?.detail || error.message || "Dapta request failed");
     }
   });
+}
+
+/** The Base44 site is public; the controller is not. Raised for a visitor who is not signed in. */
+export class SignInRequiredError extends Error {
+  constructor() {
+    super("Sign in to use Dapta");
+    this.name = "SignInRequiredError";
+  }
+}
+
+// Base44's /api/apps/auth/login route, not redirectToLogin(): with no app base URL that sends the
+// visitor to /login on this site, which serves this app again and reloaded it in a loop.
+export function signIn() {
+  base44.auth.loginWithProvider("google", window.location.href);
 }
 
 async function encodeFile(file: File): Promise<ProxyFile> {
