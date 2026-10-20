@@ -148,6 +148,26 @@ rather than assume it.
   ~0–1.5 point gaps on 1B/3B models — use that as the target band, not an
   exact reproduction).
 
+**Day 2 result (done — see `research/zflora_prototype/README.md`)**: ran
+on a real pretrained checkpoint (`Qwen/Qwen2.5-0.5B`), reimplementing the
+adapters as forward hooks on an unmodified HF model (`hf_adapters.py`) —
+the same mechanism Day 3 will reuse on Qwen3-VL. On a tiny structured-
+extraction task (free text → JSON, shaped like Dapta's real skills),
+**both standard LoRA and the zFLoRA reconstruction reach 1.000 val exact-
+match accuracy**, zFLoRA at **1/3 the trainable params** and converging
+almost as fast. This directly confirms Day 1's working hypothesis: the
+attention-routing ceiling only showed up on a randomly-initialized base;
+on a real pretrained model it doesn't bite. Pass gate met with a clean
+margin (zero gap, not just "small").
+
+New limitation found (scoped into Day 5, not a Day 2 blocker): this hook-
+based implementation recomputes the aux channel from scratch on every
+forward call, which breaks under normal KV-cached incremental decoding
+(each decode step only forward-passes the new token, so aux would reset
+on just that token instead of reflecting the full sequence). Workaround
+used for eval: `use_cache=False` (correct, slow). Production serving needs
+either an aux-channel caching mechanism or a different integration point.
+
 ### Day 3 — Port to Qwen3-VL's language backbone (GPU, test pod)
 
 - Move the validated reconstruction onto `Qwen/Qwen3-VL-8B-Instruct`'s
@@ -216,11 +236,16 @@ Only after Day 4 confirms a real win. Two options, pick based on what Day
   fusion and GQA-vs-MHA details are untested territory.
 - The vLLM serving story (Day 5) is explicitly unsolved by the paper
   itself — budget for this being the hardest part, not the training side.
+- **New, from Day 2**: the aux channel as currently wired is incompatible
+  with KV-cached incremental decoding (it's recomputed from scratch per
+  forward call). This is a second, concrete reason Day 5 is the hard part
+  — it's not just "register a custom vLLM model," the adapter mechanism
+  itself needs a caching story before it can serve efficiently at all.
 
 ## Status
 
 - [x] Day 1 — small-model CPU prototype
-- [ ] Day 2 — quality sanity check
+- [x] Day 2 — quality sanity check
 - [ ] Day 3 — port to Qwen3-VL backbone
 - [ ] Day 4 — latency measurement, go/no-go
 - [ ] Day 5 — serving path decision + build

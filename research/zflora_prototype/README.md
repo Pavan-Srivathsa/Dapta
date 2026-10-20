@@ -61,3 +61,46 @@ checkpoint, or does it behave like `increment`?
 adapter parameters, loss decreases. The `increment` vs `pair-sum` split is
 a bonus finding beyond the minimum gate, and the one thing Day 2 should
 specifically test for.
+
+## Day 2 result: real pretrained checkpoint (`day2_real_checkpoint.py`)
+
+Switched implementation approach: `hf_adapters.py` uses PyTorch forward
+hooks on an **unmodified real HF model** (`Qwen/Qwen2.5-0.5B`) instead of
+reimplementing the decoder layer. Hook points: `self_attn.o_proj`
+(backward adapter), `mlp` pre-hook (forward adapter, observes FFN input),
+`lm_head` pre-hook (final merge). This is deliberately the same mechanism
+Day 3 will point at Qwen3-VL's language backbone, not throwaway code.
+
+Task: a tiny structured-extraction mini-task shaped like Dapta's actual
+skills (`"Sentence: The red ball is here.\nJSON:"` ->
+`' {"color": "red", "object": "ball"}'`), 48 train / 16 val, completion-
+only loss (prompt tokens masked), exact-match JSON eval via greedy
+generation.
+
+**Result at 80 steps**: standard LoRA and the zFLoRA reconstruction both
+reach **1.000 val exact-match accuracy**, with zFLoRA using **358,400
+trainable params vs LoRA's 1,081,344 (about a third)** and converging
+almost as fast (train loss near-zero by step 32 for both).
+
+**This confirms the Day 1 working hypothesis directly**: the attention-
+routing ceiling seen on the random-init toy model (`pair-sum` task) does
+not show up here. A pretrained base already has useful attention
+patterns; fine-tuning a skill onto it is closer to `increment` (bias what
+the model already does) than `pair-sum` (learn routing from nothing) --
+and zFLoRA's wiring, which can't touch `q_proj`/`k_proj`, is fine for
+that regime.
+
+**New limitation found, relevant to Day 5 (serving), not Day 2's gate**:
+this hook-based implementation recomputes the aux channel from scratch on
+every hooked forward call. Under vLLM/HF's normal KV-cached incremental
+decoding, each decode step only runs a forward pass over the *new* token,
+so the aux channel would be wrongly reset from just that one token instead
+of reflecting the accumulated sequence. Eval here used `use_cache=False`
+(correct but slow -- full recompute every decode step) as a workaround.
+Production serving needs either an aux-channel KV-cache analogue or a
+different integration point -- added to Day 5's scope below, not solved
+here.
+
+**Pass gate status**: met, and the specific question Day 1 flagged is
+answered: real pretrained base, no measurable accuracy gap, at 1/3 the
+adapter parameters.
