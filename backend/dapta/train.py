@@ -7,7 +7,7 @@ import os
 import time
 from pathlib import Path
 
-from .data import REQUIRED_SPLITS, read_jsonl, sha256, to_training_rows
+from .data import REQUIRED_SPLITS, read_jsonl, sha256, to_training_rows, validate_dataset
 from .validation import require_valid_receipt_dataset
 
 
@@ -16,6 +16,16 @@ MODEL_REVISION = "0c351dd01ed87e9c1b53cbc748cba10e6187ff3b"
 MIN_IMAGE_PIXELS = 16 * 28 * 28
 MAX_IMAGE_PIXELS = 576 * 28 * 28
 MAX_SEQUENCE_LENGTH = 2048
+
+# Per-skill overrides of the LoRA recipe. Defaults above/below match the image adapters
+# (receipt-to-expense, csv-to-dashboard) already shipped; nda-intake is text-only and long
+# documents need the wider context + the MLP projections, per docs/TRAINING_RUNBOOK.md.
+LORA_TARGET_MODULES = {
+    "nda-intake": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+}
+MAX_SEQUENCE_LENGTH_OVERRIDES = {
+    "nda-intake": 6144,
+}
 
 
 def train(
@@ -46,8 +56,14 @@ def train(
         )
         if not report["passed"]:
             raise ValueError(f"dashboard dataset failed validation: {report['errors'][0]}")
+    elif skill_id == "nda-intake":
+        counts = validate_dataset(dataset_dir)
+        report = {"passed": True, "counts": counts, "errors": []}
     else:
         raise ValueError(f"unsupported skill: {skill_id}")
+
+    max_sequence_length = MAX_SEQUENCE_LENGTH_OVERRIDES.get(skill_id, MAX_SEQUENCE_LENGTH)
+    lora_target_modules = LORA_TARGET_MODULES.get(skill_id, ["q_proj", "k_proj", "v_proj", "o_proj"])
 
     import torch
     from datasets import Dataset
@@ -88,13 +104,13 @@ def train(
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=8,
         learning_rate=1e-4,
-        warmup_ratio=0.03,
+        warmup_steps=2,
         lr_scheduler_type="cosine",
         bf16=True,
         fp16=False,
         gradient_checkpointing=True,
         completion_only_loss=True,
-        max_length=MAX_SEQUENCE_LENGTH,
+        max_length=max_sequence_length,
         packing=False,
         eval_strategy="epoch",
         save_strategy="epoch",
@@ -139,7 +155,7 @@ def train(
         r=16,
         lora_alpha=32,
         lora_dropout=0.05,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+        target_modules=lora_target_modules,
         bias="none",
         task_type="CAUSAL_LM",
     )
@@ -201,7 +217,7 @@ def train(
             "learning_rate": 1e-4,
             "min_image_pixels": MIN_IMAGE_PIXELS,
             "max_image_pixels": MAX_IMAGE_PIXELS,
-            "max_sequence_length": MAX_SEQUENCE_LENGTH,
+            "max_sequence_length": max_sequence_length,
             "seed": 42,
         },
         "train_metrics": result.metrics,

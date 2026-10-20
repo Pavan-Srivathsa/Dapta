@@ -20,6 +20,7 @@ except ImportError:  # pragma: no cover - optional until deployment
 
 
 SENSITIVE_KEYS = {
+    "api_key",
     "authorization",
     "document",
     "document_text",

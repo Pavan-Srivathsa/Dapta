@@ -1,5 +1,5 @@
 import * as Sentry from "@sentry/react";
-import type { Adapter, Benchmark, Job, RouteDecision, Run } from "./types";
+import type { Adapter, Benchmark, Directory, Job, RouteDecision, Run, RunpodConnection } from "./types";
 import { base44 } from "./base44Client";
 import { toProxyTrace } from "./tracing";
 
@@ -83,6 +83,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   adapters: () => request<Adapter[]>("/v1/adapters"),
+  directory: () => request<Directory>("/v1/directory"),
+  runpodConnection: () => request<RunpodConnection>("/v1/users/me/runpod-connection"),
+  connectRunpod: (apiKey: string) =>
+    request<RunpodConnection>("/v1/users/me/runpod-connection", {
+      method: "POST",
+      body: JSON.stringify({ api_key: apiKey }),
+    }),
+  disconnectRunpod: () =>
+    request<RunpodConnection>("/v1/users/me/runpod-connection/disconnect", { method: "POST", body: "{}" }),
   benchmarks: () => request<Benchmark[]>("/v1/benchmarks"),
   runs: () => request<Run[]>("/v1/runs"),
   jobs: () => request<Job[]>("/v1/jobs"),

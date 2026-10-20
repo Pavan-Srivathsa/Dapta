@@ -95,6 +95,8 @@ class LoraFactoryOrchestrator:
             self.pending_images.pop(sender, None)
         try:
             lowered = message.lower()
+            if self._is_connect_runpod(lowered):
+                return [self._connect_runpod_instructions()]
             if lowered in {"cancel", "cancel build", "never mind", "nevermind"}:
                 return [self._cancel(session)]
             if (
@@ -590,6 +592,22 @@ class LoraFactoryOrchestrator:
         return message.startswith("run adapter")
 
     @staticmethod
+    def _is_connect_runpod(message: str) -> bool:
+        return "runpod" in message and ("connect" in message or "gpu" in message)
+
+    @staticmethod
+    def _connect_runpod_instructions() -> str:
+        # Never accept a Runpod key here: Agentverse chat is not a trusted channel for it,
+        # and the controller only accepts a key from a signed-in Base44 session (see
+        # dapta-proxy/entry.ts and api_v2.py's require_user_id). Point the user there instead.
+        return (
+            "To connect your own Runpod GPU, open the Dapta web app, sign in, and go to "
+            "Skills & Adapters → Bring your own GPU. Paste your Runpod API key there, not "
+            "here — Agentverse chat is not a safe place to send it, and I will not store one "
+            "sent this way."
+        )
+
+    @staticmethod
     def _help() -> str:
         return (
             "I am DAPTA on ASI:One — the same factory as the web app, in chat.\n"
@@ -602,5 +620,6 @@ class LoraFactoryOrchestrator:
             "Qwen LoRA, Claude, and GPT on the same input\n"
             "- attach one receipt image for the CORD specialist\n"
             "- `status` to follow a factory job\n"
-            "- `run adapter <adapter-id>` followed by `Document: ...`"
+            "- `run adapter <adapter-id>` followed by `Document: ...`\n"
+            "- `connect runpod` for how to use your own GPU"
         )

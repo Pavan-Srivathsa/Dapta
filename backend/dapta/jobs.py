@@ -15,7 +15,7 @@ from .cancellation import BuildCancelled, BuildCleanupError, cancellation_scope,
 from .observability import FactoryStage, emit_job_root, error_category, log_event, span
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 JOB_STAGES = (
     "queued", "architecting", "integrating", "building_dataset", "validating",
     "awaiting_compute", "provisioning_gpu", "training", "evaluating", "publishing",
@@ -133,10 +133,12 @@ class JobStore:
         self, *, workflow: str, idempotency_key: str, skill_id: str | None = None,
         job_id: str | None = None, created_at: str | None = None,
         route_decision: Mapping[str, Any] | None = None,
+        user_id: str | None = None,
     ) -> dict[str, Any]:
         workflow = _required(workflow, "workflow")
         idempotency_key = _required(idempotency_key, "idempotency_key")
         skill_id = skill_id.strip() if skill_id else None
+        user_id = user_id.strip() if user_id else None
         job_id = job_id or str(uuid.uuid4())
         now = _timestamp(created_at)
         workflow_hash = hashlib.sha256(workflow.encode()).hexdigest()
@@ -146,10 +148,10 @@ class JobStore:
                     """
                     INSERT INTO jobs (
                         job_id, idempotency_key, workflow, workflow_hash, skill_id,
-                        status, failure_code, failure_message, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, 'queued', NULL, NULL, ?, ?)
+                        status, failure_code, failure_message, user_id, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, 'queued', NULL, NULL, ?, ?, ?)
                     """,
-                    (job_id, idempotency_key, workflow, workflow_hash, skill_id, now, now),
+                    (job_id, idempotency_key, workflow, workflow_hash, skill_id, user_id, now, now),
                 )
                 connection.execute(
                     """
@@ -689,6 +691,7 @@ class JobStore:
                     job_id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE,
                     workflow TEXT NOT NULL, workflow_hash TEXT NOT NULL, skill_id TEXT,
                     status TEXT NOT NULL, failure_code TEXT, failure_message TEXT,
+                    user_id TEXT,
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS jobs_status_updated ON jobs(status, updated_at);
@@ -723,6 +726,10 @@ class JobStore:
                 connection.execute("INSERT INTO job_schema_info(version) VALUES (?)", (SCHEMA_VERSION,))
             elif row["version"] == 1:
                 _migrate_stage_attempts(connection)
+                _migrate_add_user_id(connection)
+                connection.execute("UPDATE job_schema_info SET version=?", (SCHEMA_VERSION,))
+            elif row["version"] == 2:
+                _migrate_add_user_id(connection)
                 connection.execute("UPDATE job_schema_info SET version=?", (SCHEMA_VERSION,))
             elif row["version"] != SCHEMA_VERSION:
                 raise RuntimeError(f"unsupported job schema: {row['version']}")
@@ -764,11 +771,11 @@ class AdapterJobOrchestrator:
 
     def create_job(
         self, *, workflow: str, idempotency_key: str, skill_id: str | None = None,
-        route_decision: Mapping[str, Any] | None = None,
+        route_decision: Mapping[str, Any] | None = None, user_id: str | None = None,
     ) -> dict[str, Any]:
         job = self.store.create_job(
             workflow=workflow, idempotency_key=idempotency_key, skill_id=skill_id,
-            route_decision=route_decision,
+            route_decision=route_decision, user_id=user_id,
         )
         self.ledger.create_run(
             run_id=job["job_id"], run_type="adapter_build", job_id=job["job_id"],
@@ -1202,6 +1209,13 @@ def _migrate_stage_attempts(connection: sqlite3.Connection) -> None:
         """,
     )
     connection.execute("DROP TABLE job_stage_attempts_v1")
+
+
+def _migrate_add_user_id(connection: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(jobs)")}
+    if "user_id" in columns:
+        return
+    connection.execute("ALTER TABLE jobs ADD COLUMN user_id TEXT")
 
 
 def round_ms(started: float) -> int:

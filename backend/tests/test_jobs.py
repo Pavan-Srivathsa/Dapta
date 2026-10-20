@@ -141,6 +141,77 @@ class JobTests(unittest.TestCase):
                 skill_id="nda-review",
             )
 
+    def test_job_carries_the_creating_users_id(self):
+        orchestrator = self.orchestrator()
+        job = orchestrator.create_job(
+            workflow="Extract fields from an NDA.",
+            idempotency_key="request-with-user",
+            skill_id="nda-intake",
+            user_id="base44-user-42",
+        )
+        self.assertEqual(job["user_id"], "base44-user-42")
+        self.assertEqual(self.store.get_job(job["job_id"])["user_id"], "base44-user-42")
+
+    def test_job_without_a_user_id_stores_none(self):
+        orchestrator = self.orchestrator()
+        job = orchestrator.create_job(
+            workflow="Extract fields from an NDA.",
+            idempotency_key="request-no-user",
+            skill_id="nda-intake",
+        )
+        self.assertIsNone(job["user_id"])
+
+    def test_schema_version_1_database_gains_a_user_id_column_on_open(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy.sqlite3"
+            import sqlite3
+
+            connection = sqlite3.connect(path)
+            connection.executescript(
+                """
+                CREATE TABLE job_schema_info (version INTEGER NOT NULL);
+                INSERT INTO job_schema_info(version) VALUES (1);
+                CREATE TABLE jobs (
+                    job_id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE,
+                    workflow TEXT NOT NULL, workflow_hash TEXT NOT NULL, skill_id TEXT,
+                    status TEXT NOT NULL, failure_code TEXT, failure_message TEXT,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE job_events (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE,
+                    job_id TEXT NOT NULL REFERENCES jobs(job_id), from_status TEXT,
+                    to_status TEXT NOT NULL, occurred_at TEXT NOT NULL, metadata_json TEXT NOT NULL
+                );
+                CREATE TABLE job_artifacts (
+                    job_id TEXT NOT NULL REFERENCES jobs(job_id), name TEXT NOT NULL,
+                    content_json TEXT NOT NULL, sha256 TEXT NOT NULL, created_at TEXT NOT NULL,
+                    PRIMARY KEY(job_id, name)
+                );
+                CREATE TABLE job_stage_attempts (
+                    job_id TEXT NOT NULL REFERENCES jobs(job_id), stage TEXT NOT NULL,
+                    status TEXT NOT NULL, claimed_at TEXT NOT NULL, completed_at TEXT,
+                    PRIMARY KEY(job_id, stage)
+                );
+                CREATE TABLE adapters (
+                    adapter_id TEXT PRIMARY KEY, skill_id TEXT NOT NULL, version TEXT NOT NULL,
+                    base_model TEXT NOT NULL, artifact_uri TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL, created_at TEXT NOT NULL,
+                    UNIQUE(skill_id, version)
+                );
+                """
+            )
+            connection.commit()
+            connection.close()
+
+            store = JobStore(path)
+            job = store.create_job(workflow="Extract fields from an NDA.", idempotency_key="legacy-1")
+            self.assertIsNone(job["user_id"])
+            job_with_user = store.create_job(
+                workflow="Extract fields from an NDA, differently.",
+                idempotency_key="legacy-2", user_id="user-from-after-migration",
+            )
+            self.assertEqual(job_with_user["user_id"], "user-from-after-migration")
+
     def test_complete_factory_run_publishes_adapter_and_progress(self):
         orchestrator = self.orchestrator()
         job = orchestrator.create_job(

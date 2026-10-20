@@ -148,6 +148,19 @@ class OrchestratorTests(unittest.TestCase):
             sender, f"Access code {self.ACCESS_CODE}. {workflow}"
         )
 
+    def test_connect_runpod_points_to_the_web_app_without_touching_the_client(self):
+        reply = self.orchestrator.handle("agent1", "connect runpod")
+
+        self.assertIn("Skills & Adapters", reply[0])
+        self.assertIn("Bring your own GPU", reply[0])
+        self.assertEqual(self.client.calls, [], "connect runpod must never call the controller")
+
+    def test_connect_runpod_never_stores_a_key_sent_in_chat(self):
+        reply = self.orchestrator.handle("agent1", "connect runpod key rp_abc123")
+
+        self.assertIn("not here", reply[0])
+        self.assertEqual(self.client.calls, [])
+
     def test_create_requires_confirmation_before_factory_call(self):
         first = self.prepare_build(
             "agent1", "Create a LoRA adapter that extracts synthetic receipts"

@@ -12,6 +12,9 @@ from dapta.factory_runtime import (
     training_allocation_id,
     training_instance_id,
 )
+from dapta.runpod_connection import RunpodConnectionStore
+
+import httpx
 
 
 class FactoryRuntimeTests(unittest.TestCase):
@@ -252,6 +255,46 @@ class FactoryRuntimeTests(unittest.TestCase):
         self.assertEqual(calls[0]["round"], 1)
         self.assertTrue(result["passed"])
         self.assertTrue(result["evaluation_only"])
+
+    def test_byo_gpu_note_is_a_visible_flag_not_a_real_switch(self):
+        """A connected user's GPU is noted, but every round still reports "shared".
+
+        This backend has no remote-provisioning code at all; _byo_gpu_note exists so a
+        future provisioning backend has a single, tested place to plug into, not to
+        imply one already exists.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            connections = RunpodConnectionStore(Path(directory) / "runpod.sqlite3")
+
+            def handler(request: httpx.Request) -> httpx.Response:
+                return httpx.Response(200, json={"pods": []})
+
+            connections.connect(
+                "connected-user", "real-looking-key-123",
+                client=httpx.Client(transport=httpx.MockTransport(handler)),
+            )
+            backend = RunPodTrainingBackend(
+                ledger=None, lifecycle=None, runpod_connections=connections,
+            )
+
+            connected_source, connected_note = backend._byo_gpu_note({"user_id": "connected-user"})
+            self.assertEqual(connected_source, "shared")
+            self.assertIsNotNone(connected_note)
+            self.assertIn("not implemented yet", connected_note)
+
+            unconnected_source, unconnected_note = backend._byo_gpu_note({"user_id": "stranger"})
+            self.assertEqual(unconnected_source, "shared")
+            self.assertIsNone(unconnected_note)
+
+            anonymous_source, anonymous_note = backend._byo_gpu_note({"user_id": None})
+            self.assertEqual(anonymous_source, "shared")
+            self.assertIsNone(anonymous_note)
+
+    def test_byo_gpu_note_is_safe_with_no_connection_store_configured(self):
+        backend = RunPodTrainingBackend(ledger=None, lifecycle=None)
+        source, note = backend._byo_gpu_note({"user_id": "anyone"})
+        self.assertEqual(source, "shared")
+        self.assertIsNone(note)
 
 
 if __name__ == "__main__":

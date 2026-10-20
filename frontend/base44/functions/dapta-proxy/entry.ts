@@ -77,6 +77,8 @@ export default async function (request: Request): Promise<Response> {
   }
 
   const headers = new Headers({ "X-Dapta-Token": controllerToken });
+  const userId = (user as { id?: string }).id;
+  if (userId) headers.set("X-Dapta-User-Id", userId);
   if (payload.idempotencyKey) headers.set("Idempotency-Key", payload.idempotencyKey);
   for (const [name, value] of Object.entries(traceHeaders(payload.trace, request.headers))) headers.set(name, value);
   let body: BodyInit | undefined;

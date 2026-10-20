@@ -8,6 +8,28 @@ export type Adapter = {
   metadata: Record<string, unknown>;
 };
 
+export type BaseModelInfo = {
+  model_id: string;
+  family: string;
+  params_b: number;
+  modality: string;
+  approx_vram_gb_bf16: number;
+  license: string;
+  status: "integrated" | "catalog_only";
+  note: string;
+  adapter_ids: string[];
+};
+
+export type Directory = {
+  base_models: BaseModelInfo[];
+  adapter_count: number;
+  integrated_base_model: string | null;
+};
+
+export type RunpodConnection =
+  | { connected: false }
+  | { connected: true; masked_hint: string; connected_at: string };
+
 export type Condition = {
   status: string;
   model: string;
@@ -49,6 +71,7 @@ export type Benchmark = {
   conditions: Record<string, Record<string, number | string>>;
   evidence_status?: "measured" | "illustrative" | "mixed";
   evidence_note?: string;
+  cost_metric?: "usd" | "tokens";
 };
 
 export type Job = {

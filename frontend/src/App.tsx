@@ -9,9 +9,9 @@ import { api, SignInRequiredError, signIn } from "./api";
 import { Conversation, AdapterDrawer } from "./Conversation";
 import { ModelOutput } from "./ModelOutput";
 import { PollCoordinator, type PollTelemetry } from "./polling";
-import type { Adapter, Benchmark, Condition, Job, Run } from "./types";
+import type { Adapter, BaseModelInfo, Benchmark, Condition, Directory, Job, Run, RunpodConnection } from "./types";
 
-type Tab = "chat" | "performance";
+type Tab = "chat" | "performance" | "registry";
 type PerformanceView = "live" | "lift";
 
 const labels: Record<string, string> = {
@@ -20,43 +20,8 @@ const labels: Record<string, string> = {
   frontier_b: "GPT",
 };
 
-// Temporary demo-only projections. These are deliberately kept out of the benchmark
-// ledger and labelled in the UI so they cannot be confused with measured evidence.
-const illustrativeBenchmarks: Benchmark[] = [
-  {
-    benchmark_id: "demo-support-router-v1",
-    name: "Support Code Router — demo projection",
-    created_at: "2026-10-18T00:00:00Z",
-    view: "adapter_lift",
-    test_documents: 120,
-    test_sha256: "illustrative-demo-data-not-a-frozen-test",
-    evidence_status: "illustrative",
-    evidence_note: "Illustrative demo projection—not produced by a completed benchmark run.",
-    conditions: {
-      base_no_skill: { label: "Qwen Base", accuracy: 68.3, latency_seconds: 1.46, cost_usd: 0.00018 },
-      base_with_skill: { label: "Qwen + Skill", accuracy: 89.2, latency_seconds: 1.28, cost_usd: 0.00016 },
-      lora_short_prompt: { label: "Qwen LoRA", accuracy: 96.7, latency_seconds: 0.74, cost_usd: 0.00009 },
-    },
-  },
-  {
-    benchmark_id: "demo-csv-cleaner-v1",
-    name: "CSV Cleaner & Dashboard — demo projection",
-    created_at: "2026-10-18T00:00:00Z",
-    view: "adapter_lift",
-    test_documents: 60,
-    test_sha256: "illustrative-demo-data-not-a-frozen-test",
-    evidence_status: "illustrative",
-    evidence_note: "Illustrative demo projection—not produced by a completed benchmark run.",
-    conditions: {
-      base_no_skill: { label: "Qwen Base", accuracy: 52.8, latency_seconds: 2.84, cost_usd: 0.00035 },
-      base_with_skill: { label: "Qwen + Skill", accuracy: 83.6, latency_seconds: 2.63, cost_usd: 0.00032 },
-      lora_short_prompt: { label: "Qwen LoRA", accuracy: 94.4, latency_seconds: 1.31, cost_usd: 0.00016 },
-    },
-  },
-];
-
 function withDemoEvidence(measured: Benchmark[]): Benchmark[] {
-  const enriched = measured.map((benchmark) => benchmark.benchmark_id === "nda-kleister-v1" ? {
+  return measured.map((benchmark) => benchmark.benchmark_id === "nda-kleister-v1" ? {
     ...benchmark,
     evidence_status: "mixed" as const,
     evidence_note: "Accuracy and speed are measured. Cost is an illustrative GPU-time estimate for today’s demo.",
@@ -65,8 +30,6 @@ function withDemoEvidence(measured: Benchmark[]): Benchmark[] {
       cost_usd: Number(value.cost_usd || Number(value.latency_seconds || 0) * 0.44 / 3600),
     }])),
   } : benchmark);
-  const ids = new Set(enriched.map((benchmark) => benchmark.benchmark_id));
-  return [...enriched, ...illustrativeBenchmarks.filter((benchmark) => !ids.has(benchmark.benchmark_id))];
 }
 
 function recordPoll(event: PollTelemetry) {
@@ -89,6 +52,8 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("chat");
   const [view, setView] = useState<PerformanceView>("live");
   const [adapters, setAdapters] = useState<Adapter[]>([]);
+  const [directory, setDirectory] = useState<Directory>();
+  const [selectedBaseModel, setSelectedBaseModel] = useState<string>();
   const [benchmarks, setBenchmarks] = useState<Benchmark[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -104,9 +69,13 @@ export default function App() {
   const closeLibrary = useCallback(() => setLibraryOpen(false), []);
 
   const refresh = useCallback(async () => polls.current.run(async () => {
-    const results = await Promise.allSettled([api.adapters(), api.benchmarks(), api.runs(), api.jobs()]);
-    const [adapterResult, benchmarkResult, runResult, jobResult] = results;
+    const results = await Promise.allSettled([api.adapters(), api.benchmarks(), api.runs(), api.jobs(), api.directory()]);
+    const [adapterResult, benchmarkResult, runResult, jobResult, directoryResult] = results;
     if (adapterResult.status === "fulfilled") setAdapters(adapterResult.value);
+    if (directoryResult.status === "fulfilled") {
+      setDirectory(directoryResult.value);
+      setSelectedBaseModel((current) => current || directoryResult.value.integrated_base_model || undefined);
+    }
     if (benchmarkResult.status === "fulfilled") {
       const evidence = withDemoEvidence(benchmarkResult.value);
       setBenchmarks(evidence);
@@ -166,7 +135,7 @@ export default function App() {
   return <div className="app-shell">
     <header className="topbar">
       <a className="brand" href="#" aria-label="Dapta home" onClick={() => setTab("chat")}><span className="brand-lockup"><img src="/dapta-chameleon.png" alt="" /><span className="brand-word">Dapta</span></span></a>
-      <nav aria-label="Main navigation"><TabButton active={tab === "chat"} onClick={() => setTab("chat")}>Chat</TabButton><TabButton active={tab === "performance"} onClick={() => setTab("performance")}>Performance</TabButton></nav>
+      <nav aria-label="Main navigation"><TabButton active={tab === "chat"} onClick={() => setTab("chat")}>Chat</TabButton><TabButton active={tab === "performance"} onClick={() => setTab("performance")}>Performance</TabButton><TabButton active={tab === "registry"} onClick={() => setTab("registry")}>Skills & Adapters</TabButton></nav>
       <span className="secure-pill"><span />Private workspace</span>
     </header>
     <main>
@@ -183,6 +152,9 @@ export default function App() {
         setSelectedRun={setSelectedRun} run={runs.find((run) => run.run_id === selectedRun)} benchmarks={benchmarks}
         selectedBenchmark={selectedBenchmark} setSelectedBenchmark={setSelectedBenchmark}
         benchmark={benchmarks.find((item) => item.benchmark_id === selectedBenchmark)} />}
+      {tab === "registry" && <Registry adapters={adapters} jobs={jobs} selectedJob={selectedJob} setSelectedJob={setSelectedJob}
+        onTest={(adapter) => { setSuggestedAdapter(adapter); setTab("chat"); }} onRetry={retry}
+        directory={directory} selectedBaseModel={selectedBaseModel} onSelectBaseModel={setSelectedBaseModel} />}
     </main>
     {libraryOpen && <AdapterDrawer adapters={adapters} jobs={jobs} onClose={closeLibrary}
       onSelect={(adapter) => { setSuggestedAdapter(adapter); setLibraryOpen(false); setTab("chat"); }}
@@ -246,35 +218,42 @@ function Performance(props: {
         {props.view === "lift" && props.benchmarks.map((item) => <button className={props.selectedBenchmark === item.benchmark_id ? "active" : ""} onClick={() => props.setSelectedBenchmark(item.benchmark_id)} key={item.benchmark_id}>{item.name}<small>{item.evidence_status === "illustrative" ? `${item.test_documents} illustrative cases` : `${item.test_documents} frozen cases`}</small></button>)}
       </div>
       {props.view === "lift" && props.benchmark?.evidence_status && <div className={`evidence-disclosure ${props.benchmark.evidence_status}`} role="note"><strong>{props.benchmark.evidence_status === "illustrative" ? "Illustrative demo data" : "Measured benchmark + estimated cost"}</strong><span>{props.benchmark.evidence_note}</span></div>}
-      {props.view === "live" ? props.run ? <ModelGrid run={props.run} running={["queued", "running"].includes(props.run.status)} /> : <EmptyState text="Your completed comparisons will appear here." /> : conditions.length ? <><Summary conditions={conditions} /><div className="chart-grid"><MetricChart title="Speed" suffix="s" lower conditions={conditions} field="time" /><MetricChart title="Cost" suffix="$" lower conditions={conditions} field="cost" /><MetricChart title="Accuracy" suffix="%" conditions={conditions} field="accuracy" /></div></> : <EmptyState text="No training benchmarks yet." />}
-      {props.view === "lift" && props.benchmark?.evidence_status !== "illustrative" && props.benchmark && <p className="fine-print">Frozen test SHA-256: <code>{props.benchmark.test_sha256}</code>. Accuracy is labeled field F1; schema validity and exact-form rate remain available in the saved benchmark.</p>}
+      {props.view === "live" ? props.run ? <ModelGrid run={props.run} running={["queued", "running"].includes(props.run.status)} /> : <EmptyState text="Your completed comparisons will appear here." /> : conditions.length ? <><Summary conditions={conditions} costMetric={props.view === "lift" ? props.benchmark?.cost_metric : undefined} /><div className="chart-grid"><MetricChart title="Speed" suffix="s" lower conditions={conditions} field="time" />{(props.view === "lift" ? props.benchmark?.cost_metric : undefined) === "tokens" ? <MetricChart title="Tokens" suffix=" tok" lower conditions={conditions} field="tokens" /> : <MetricChart title="Cost" suffix="$" lower conditions={conditions} field="cost" />}<MetricChart title="Accuracy" suffix="%" conditions={conditions} field="accuracy" /></div></> : <EmptyState text="No training benchmarks yet." />}
+      {props.view === "lift" && props.benchmark?.evidence_status !== "illustrative" && props.benchmark && <p className="fine-print">Frozen test SHA-256: <code>{props.benchmark.test_sha256}</code>. Accuracy is labeled field F1.{Object.values(props.benchmark.conditions)[0]?.schema_validity !== undefined && " Schema validity and exact-form rate remain available in the saved benchmark."}</p>}
       {props.view === "live" && <RunHistoryTable runs={props.runs} selectedRun={props.selectedRun} setSelectedRun={props.setSelectedRun} />}
     </section>
   );
 }
 
-type ChartCondition = { name: string; label: string; time: number; cost: number; accuracy: number };
+type ChartCondition = { name: string; label: string; time: number; cost: number; tokens: number; accuracy: number };
 
-function Summary({ conditions }: { conditions: ChartCondition[] }) {
-  return <div className="summary-strip"><div><small>Fastest</small><strong>{winningLabel(conditions, "time", true)}</strong></div><div><small>Lowest cost</small><strong>{winningLabel(conditions, "cost", true)}</strong></div><div><small>Most accurate</small><strong>{winningLabel(conditions, "accuracy", false)}</strong></div></div>;
+function Summary({ conditions, costMetric }: { conditions: ChartCondition[]; costMetric?: "usd" | "tokens" }) {
+  const costField = costMetric === "tokens" ? "tokens" : "cost";
+  return <div className="summary-strip"><div><small>Fastest</small><strong>{winningLabel(conditions, "time", true)}</strong></div><div><small>{costMetric === "tokens" ? "Fewest tokens" : "Lowest cost"}</small><strong>{winningLabel(conditions, costField, true)}</strong></div><div><small>Most accurate</small><strong>{winningLabel(conditions, "accuracy", false)}</strong></div></div>;
 }
 
-function MetricChart({ title, suffix, lower, conditions, field }: { title: string; suffix: string; lower?: boolean; conditions: ChartCondition[]; field: "time" | "cost" | "accuracy" }) {
+function MetricChart({ title, suffix, lower, conditions, field }: { title: string; suffix: string; lower?: boolean; conditions: ChartCondition[]; field: "time" | "cost" | "accuracy" | "tokens" }) {
   const max = Math.max(...conditions.map((item) => item[field]), 0.00001);
-  return <article className="chart"><div className="chart-head"><h3>{title}</h3><span>{lower ? "Lower is better" : "Higher is better"}</span></div>{conditions.map((item) => <div className="bar-row" key={item.name}><div><strong>{item.label}</strong><span>{field === "cost" ? "$" : ""}{formatMetric(item[field], field)}{field === "cost" ? "" : suffix}</span></div><div className="track"><span className={item.name} style={{ width: `${Math.max(3, item[field] / max * 100)}%` }} /></div></div>)}</article>;
+  const bestValue = conditions.length
+    ? (lower ? Math.min(...conditions.map((item) => item[field])) : Math.max(...conditions.map((item) => item[field])))
+    : null;
+  return <article className="chart"><div className="chart-head"><h3>{title}</h3><span>{lower ? "Lower is better" : "Higher is better"}</span></div>{conditions.map((item) => {
+    const isBest = bestValue != null && Math.abs(item[field] - bestValue) < 0.000001;
+    return <div className={`bar-row ${isBest ? "bar-row-best" : ""}`} key={item.name}><div><strong>{item.label}</strong><span>{isBest && <span className="bar-best-tag">Best</span>}{field === "cost" ? "$" : ""}{formatMetric(item[field], field)}{field === "cost" ? "" : suffix}</span></div><div className="track"><span className={item.name} style={{ width: `${Math.max(3, item[field] / max * 100)}%` }} /></div></div>;
+  })}</article>;
 }
 
 function RunHistoryTable({ runs, selectedRun, setSelectedRun }: { runs: Run[]; selectedRun?: string; setSelectedRun: (id: string) => void }) {
   const ordered = runs.filter((run) => run.status === "completed").sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
   return <section className="history-section"><div className="history-heading"><div><span>Previous completed runs</span><h2>Comparison history</h2></div><small>Most recent first</small></div>{ordered.length ? <div className="table-scroll"><table><thead><tr><th>Date &amp; time</th><th>Speed</th><th>Tokens</th><th>Cost</th><th>Quality</th><th>Overall winner</th></tr></thead><tbody>{ordered.map((run) => {
     const conditions = liveConditions(run);
-    const tokens = Object.entries(run.results).filter(([, value]) => value.status === "completed" && value.metrics.input_tokens != null && value.metrics.output_tokens != null).map(([name, value]) => ({ name, label: value.label || labels[name] || name, time: 0, cost: 0, accuracy: Number(value.metrics.input_tokens) + Number(value.metrics.output_tokens) }));
+    const tokens = Object.entries(run.results).filter(([, value]) => value.status === "completed" && value.metrics.input_tokens != null && value.metrics.output_tokens != null).map(([name, value]) => ({ name, label: value.label || labels[name] || name, time: 0, cost: 0, tokens: 0, accuracy: Number(value.metrics.input_tokens) + Number(value.metrics.output_tokens) }));
     const overall = overallWinner(conditions);
     return <tr key={run.run_id} className={selectedRun === run.run_id ? "selected" : ""} onClick={() => setSelectedRun(run.run_id)}><td><button className="history-select" onClick={() => setSelectedRun(run.run_id)} aria-label={`Review comparison from ${new Date(run.created_at).toLocaleString()}`}>{new Date(run.created_at).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })}</button><span>{new Date(run.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span></td><td><strong>{winningLabel(conditions, "time", true)}</strong><span>{conditions.length ? `${Math.min(...conditions.map((item) => item.time)).toFixed(2)}s` : "—"}</span></td><td><strong>{tokens.length === 3 ? winningLabel(tokens, "accuracy", true) : "—"}</strong><span>{tokens.length === 3 ? Math.min(...tokens.map((item) => item.accuracy)).toLocaleString() : "Usage unavailable"}</span></td><td><strong>{winningLabel(conditions, "cost", true)}</strong><span>{conditions.length ? `$${Math.min(...conditions.map((item) => item.cost)).toFixed(5)}` : "—"}</span></td><td><strong>{winningLabel(conditions, "accuracy", false)}</strong><span>{conditions.length ? `${Math.max(...conditions.map((item) => item.accuracy)).toFixed(1)}%` : "—"}</span></td><td><span className="winner-pill">{overall}</span></td></tr>;
   })}</tbody></table></div> : <EmptyState text="Completed comparisons will appear here." />}</section>;
 }
 
-function winningLabel(items: ChartCondition[], field: "time" | "cost" | "accuracy", lower: boolean) {
+function winningLabel(items: ChartCondition[], field: "time" | "cost" | "accuracy" | "tokens", lower: boolean) {
   if (!items.length) return "—";
   const best = lower ? Math.min(...items.map((item) => item[field])) : Math.max(...items.map((item) => item[field]));
   const winners = items.filter((item) => Math.abs(item[field] - best) < 0.000001);
@@ -307,12 +286,115 @@ const factoryStages = [
   { key: "publishing", label: "Registry publish", poweredBy: "Hugging Face", detail: "Weights, metrics, manifest", icon: UploadCloud },
 ] as const;
 
-export function Registry({ adapters, jobs, selectedJob, setSelectedJob, onTest, onRetry }: {
+// Real adapters don't carry a "source" field in their metadata (catalog-only ones do, set at
+// registration time); this is the honest provenance for the two trained today, kept here rather
+// than invented in the backend after the fact.
+const DATASET_BY_SKILL: Record<string, string> = {
+  "nda-intake": "Kleister-NDA frozen test (83 documents)",
+  "receipt-to-expense": "naver-clova-ix/cord-v2 (CORD), imported LoRA — not a frozen Dapta benchmark",
+};
+
+function adapterDataset(adapter: Adapter): string {
+  const source = adapter.metadata.source;
+  if (typeof source === "string" && source) return source;
+  return DATASET_BY_SKILL[adapter.skill_id] || "Not recorded yet";
+}
+
+function adapterSpec(adapter: Adapter): string[] {
+  const spec: string[] = [];
+  const keywords = adapter.metadata.keywords;
+  if (Array.isArray(keywords) && keywords.length) spec.push(`Matches: ${keywords.join(", ")}`);
+  const requiredFields = adapter.metadata.required_fields;
+  if (Array.isArray(requiredFields) && requiredFields.length) spec.push(`Output fields: ${requiredFields.join(", ")}`);
+  if (adapter.metadata.accepts_image) spec.push("Accepts one JPEG/PNG/WebP image");
+  if (!spec.length) spec.push("No output contract recorded yet");
+  return spec;
+}
+
+function shortModelName(modelId: string) { return modelId.split("/").pop() || modelId; }
+
+export function BaseModelPicker({ directory, selected, onSelect }: {
+  directory?: Directory; selected?: string; onSelect: (modelId: string) => void;
+}) {
+  if (!directory) return null;
+  return (
+    <div className="base-model-picker">
+      <div className="base-model-picker-head"><h2>Start with a base model</h2><p>Every adapter here is a LoRA on top of one of these. Switching base models on a live worker takes minutes, not milliseconds — this chooses which one to browse, it does not reload the running worker.</p></div>
+      <div className="base-model-grid">
+        {directory.base_models.map((model) => (
+          <button
+            key={model.model_id}
+            className={`base-model-chip ${selected === model.model_id ? "active" : ""} ${model.status}`}
+            onClick={() => onSelect(model.model_id)}
+          >
+            <span className="base-model-status"><span />{model.status === "integrated" ? "Serving now" : "Catalog only"}</span>
+            <strong>{shortModelName(model.model_id)}</strong>
+            <span className="base-model-meta">{model.params_b}B · {model.modality === "text+image" ? "text + image" : "text"} · {model.license}</span>
+            <span className="base-model-meta">~{model.approx_vram_gb_bf16}GB VRAM (bf16) · {model.adapter_ids.length} task{model.adapter_ids.length === 1 ? "" : "s"}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export function RunpodConnect() {
+  const [status, setStatus] = useState<RunpodConnection>();
+  const [apiKey, setApiKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+
+  useEffect(() => { api.runpodConnection().then(setStatus).catch(() => undefined); }, []);
+
+  async function connect() {
+    if (!apiKey.trim() || busy) return;
+    setBusy(true); setError(undefined);
+    try { setStatus(await api.connectRunpod(apiKey.trim())); setApiKey(""); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Could not verify that key."); }
+    finally { setBusy(false); }
+  }
+  async function disconnect() {
+    if (busy) return;
+    setBusy(true); setError(undefined);
+    try { setStatus(await api.disconnectRunpod()); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Could not disconnect."); }
+    finally { setBusy(false); }
+  }
+
+  if (!status) return null;
+  return (
+    <div className="runpod-connect">
+      <div className="runpod-connect-head">
+        <Cpu size={16} />
+        <div><strong>Bring your own GPU</strong><p>Connect your Runpod account so a future training run can use your own pod instead of the shared one. This only manages the connection — a build still uses the shared GPU today.</p></div>
+      </div>
+      {status.connected ? (
+        <div className="runpod-connect-status">
+          <span className="runpod-connected-pill"><span />Connected · {status.masked_hint}</span>
+          <button onClick={() => void disconnect()} disabled={busy}>{busy ? "Disconnecting…" : "Disconnect"}</button>
+        </div>
+      ) : (
+        <div className="runpod-connect-form">
+          <input type="password" placeholder="Runpod API key" aria-label="Runpod API key" value={apiKey}
+            onChange={(event) => setApiKey(event.target.value)} disabled={busy}
+            onKeyDown={(event) => { if (event.key === "Enter") void connect(); }} />
+          <button onClick={() => void connect()} disabled={busy || !apiKey.trim()}>{busy ? "Verifying…" : "Connect"}</button>
+        </div>
+      )}
+      {error && <p className="reply-error" role="alert">{error}</p>}
+    </div>
+  );
+}
+
+export function Registry({ adapters, jobs, selectedJob, setSelectedJob, onTest, onRetry, directory, selectedBaseModel, onSelectBaseModel }: {
   adapters: Adapter[]; jobs: Job[]; selectedJob?: string;
   setSelectedJob: (id: string) => void; onTest: (adapter?: Adapter) => void;
   onRetry: (jobId: string) => Promise<void>;
+  directory?: Directory; selectedBaseModel?: string; onSelectBaseModel: (modelId: string) => void;
 }) {
   const job = jobs.find((item) => item.job_id === selectedJob) || jobs[0];
+  const visible = selectedBaseModel ? adapters.filter((adapter) => adapter.base_model === selectedBaseModel) : adapters;
+  const activeModel = directory?.base_models.find((model) => model.model_id === selectedBaseModel);
   return (
     <section className="page">
       <div className="page-title"><span><Layers3 size={18} /> Factory</span><h1>Skills & Adapters</h1><p>Watch the factory make each decision, train the specialist, and preserve its evidence.</p></div>
@@ -322,13 +404,32 @@ export function Registry({ adapters, jobs, selectedJob, setSelectedJob, onTest, 
         </div>
       )}
       {job && <FactoryTimeline job={job} onRetry={onRetry} />}
-      <div className="registry-heading"><div><h2>Adapter registry</h2><p>Ready specialists restored from Hugging Face.</p></div><button onClick={() => onTest()}><Plus size={16} />New specialist</button></div>
+      <BaseModelPicker directory={directory} selected={selectedBaseModel} onSelect={onSelectBaseModel} />
+      <RunpodConnect />
+      <div className="registry-heading"><div><h2>Adapter registry</h2><p>{activeModel ? `Tasks for ${shortModelName(activeModel.model_id)}.` : "Ready specialists restored from Hugging Face."}</p></div><button onClick={() => onTest()}><Plus size={16} />New specialist</button></div>
       <div className="registry-grid">
-        {adapters.map((adapter) => {
+        {visible.map((adapter) => {
           const needsRepair = adapter.metadata.benchmark_status === "needs_repair";
-          return <article className="adapter-card" key={adapter.adapter_id}><div className="adapter-icon"><FileText /></div><span className={needsRepair ? "building-pill" : "ready"}><span />{needsRepair ? "Benchmark repair" : "Ready"}</span><h2>{String(adapter.metadata.name || adapter.skill_id)}</h2><p>{String(adapter.metadata.description || "Reusable LoRA adapter")}</p><dl><div><dt>Base model</dt><dd>{adapter.base_model.split("/").pop()}</dd></div><div><dt>Benchmark</dt><dd>{needsRepair ? "Pending rerun" : `${(Number(adapter.metadata.benchmark_accuracy || 0) * 100).toFixed(1)}% F1`}</dd></div><div><dt>Version</dt><dd>{adapter.version}</dd></div><div><dt>Training cost</dt><dd>${Number(adapter.metadata.training_cost_usd || 0).toFixed(3)}</dd></div></dl><button onClick={() => onTest(adapter)}>Test adapter</button></article>;
+          const catalogOnly = adapter.metadata.status === "catalog";
+          const statusLabel = catalogOnly ? "Not trained yet" : needsRepair ? "Benchmark repair" : "Ready";
+          const statusClass = catalogOnly ? "catalog-pill" : needsRepair ? "building-pill" : "ready";
+          return <article className={`adapter-card ${catalogOnly ? "catalog-only" : ""}`} key={adapter.adapter_id}>
+            <div className="adapter-icon"><FileText /></div>
+            <span className={statusClass}><span />{statusLabel}</span>
+            <h2>{String(adapter.metadata.name || adapter.skill_id)}</h2>
+            <p>{String(adapter.metadata.description || "Reusable LoRA adapter")}</p>
+            <dl>
+              <div><dt>Base model</dt><dd>{shortModelName(adapter.base_model)}</dd></div>
+              <div><dt>Dataset</dt><dd>{adapterDataset(adapter)}</dd></div>
+              {!catalogOnly && <div><dt>Benchmark</dt><dd>{needsRepair ? "Pending rerun" : `${(Number(adapter.metadata.benchmark_accuracy || 0) * 100).toFixed(1)}% F1`}</dd></div>}
+              <div><dt>Version</dt><dd>{adapter.version}</dd></div>
+              {!catalogOnly && <div><dt>Training cost</dt><dd>${Number(adapter.metadata.training_cost_usd || 0).toFixed(3)}</dd></div>}
+            </dl>
+            <ul className="adapter-spec">{adapterSpec(adapter).map((line) => <li key={line}>{line}</li>)}</ul>
+            <button onClick={() => onTest(adapter)} disabled={catalogOnly} title={catalogOnly ? "This task has no trained weights yet" : undefined}>{catalogOnly ? "Not available yet" : "Test adapter"}</button>
+          </article>;
         })}
-        {!adapters.length && <button className="new-card" onClick={() => onTest()}><Plus /><span>Create a new specialist</span></button>}
+        {!visible.length && <button className="new-card" onClick={() => onTest()}><Plus /><span>Create a new specialist</span></button>}
       </div>
     </section>
   );
@@ -589,7 +690,7 @@ function FactoryResults({ evaluation }: { evaluation: NonNullable<Job["determini
 
 function TabButton({ active, children, onClick }: { active: boolean; children: React.ReactNode; onClick: () => void }) { return <button className={active ? "active" : ""} onClick={onClick}>{children}</button>; }
 function EmptyState({ text }: { text: string }) { return <div className="empty"><Sparkles /><p>{text}</p></div>; }
-function liveConditions(run?: Run): ChartCondition[] { return run ? Object.entries(run.results).filter(([, value]) => value.status === "completed").map(([name, value]) => ({ name, label: value.label || labels[name] || name, time: (value.metrics.latency_ms || 0) / 1000, cost: Number(value.metrics.cost_usd || 0), accuracy: value.metrics.accuracy || 0 })) : []; }
-function benchmarkConditions(benchmark?: Benchmark): ChartCondition[] { return benchmark ? Object.entries(benchmark.conditions).map(([name, value]) => ({ name, label: String(value.label), time: Number(value.latency_seconds || 0), cost: Number(value.cost_usd || 0), accuracy: Number(value.accuracy || 0) })) : []; }
-function formatMetric(value: number, field: string) { return field === "cost" ? value.toFixed(5) : field === "time" ? value.toFixed(2) : value.toFixed(1); }
+function liveConditions(run?: Run): ChartCondition[] { return run ? Object.entries(run.results).filter(([, value]) => value.status === "completed").map(([name, value]) => ({ name, label: value.label || labels[name] || name, time: (value.metrics.latency_ms || 0) / 1000, cost: Number(value.metrics.cost_usd || 0), tokens: Number(value.metrics.input_tokens || 0) + Number(value.metrics.output_tokens || 0), accuracy: value.metrics.accuracy || 0 })) : []; }
+function benchmarkConditions(benchmark?: Benchmark): ChartCondition[] { return benchmark ? Object.entries(benchmark.conditions).map(([name, value]) => ({ name, label: String(value.label), time: Number(value.latency_seconds || 0), cost: Number(value.cost_usd || 0), tokens: Number(value.input_tokens || 0) + Number(value.output_tokens || 0), accuracy: Number(value.accuracy || 0) })) : []; }
+function formatMetric(value: number, field: string) { return field === "cost" ? value.toFixed(5) : field === "time" ? value.toFixed(2) : field === "tokens" ? Math.round(value).toLocaleString() : value.toFixed(1); }
 function stageLabel(stage: string) { return stage.split("_").map((word) => word[0]?.toUpperCase() + word.slice(1)).join(" "); }

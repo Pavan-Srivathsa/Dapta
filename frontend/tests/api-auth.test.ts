@@ -39,7 +39,7 @@ test("a signed-out visitor sees the sign-in screen after one load, with no reloa
     await act(async () => { root.render(createElement(App)); });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1800)); });
     assert.match(document.body.textContent || "", /Sign in to use Dapta/);
-    assert.equal(invocations.length - before, 4, "one initial load of four requests, then nothing");
+    assert.equal(invocations.length - before, 5, "one initial load of five requests, then nothing");
     assert.deepEqual(signInRedirects, []);
   } finally {
     act(() => root.unmount());

@@ -18,6 +18,7 @@ from typing import Any, Mapping
 from .cancellation import BuildCancelled, BuildCleanupError, cancellation_check, check_cancelled
 from .devin import DevinClient, DevinError
 from .factory_limits import DatasetPolicy, SMOKE_PROFILE, apply_smoke_training_limits, smoke_dataset_policy
+from .runpod_connection import RunpodConnectionStore
 from .jobs import (
     AdapterJobOrchestrator,
     JobBlocked,
@@ -299,9 +300,20 @@ class QwenLifecycle:
 
 
 class RunPodTrainingBackend:
-    def __init__(self, ledger: UsageLedger, lifecycle: QwenLifecycle):
+    def __init__(
+        self,
+        ledger: UsageLedger,
+        lifecycle: QwenLifecycle,
+        *,
+        runpod_connections: RunpodConnectionStore | None = None,
+    ):
         self.ledger = ledger
         self.lifecycle = lifecycle
+        # Selection point only: a connected user is recorded on every training round
+        # (see `_byo_gpu_note` below), but a round still always trains on the shared
+        # GPU. Actually provisioning and training on the user's own Runpod account is
+        # not implemented -- don't read a "user_runpod" note as meaning it happened.
+        self.runpod_connections = runpod_connections
         self.work_dir = Path(os.environ.get("DAPTA_FACTORY_WORK_DIR", "artifacts/factory"))
         self.hourly_cost = Decimal(os.environ.get("RUNPOD_GPU_HOURLY_COST_USD", "0.59"))
         self.maximum_cost = Decimal(os.environ.get("DAPTA_FACTORY_MAX_JOB_COST_USD", "5"))
@@ -323,6 +335,22 @@ class RunPodTrainingBackend:
             raise JobBlocked(
                 f"awaiting_compute: ${estimate} worst-case estimate exceeds ${self.maximum_cost} cap"
             )
+
+    def _byo_gpu_note(self, job: Mapping[str, Any]) -> tuple[str, str | None]:
+        """Record whether this job's user has a connected Runpod GPU, honestly.
+
+        Returns (gpu_source, note). gpu_source is always "shared" today -- this is
+        a visibility hook for a future provisioning backend, not a real switch.
+        """
+        user_id = job.get("user_id")
+        if not user_id or not self.runpod_connections:
+            return "shared", None
+        if not self.runpod_connections.get_api_key(str(user_id)):
+            return "shared", None
+        return "shared", (
+            "This user has a connected Runpod GPU, but training on it is not implemented "
+            "yet; this round ran on Dapta's shared GPU instead."
+        )
 
     def train(
         self,
@@ -409,6 +437,10 @@ class RunPodTrainingBackend:
             )
         result["training_cost_usd"] = str(cost)
         result["adapter_dir"] = str(output_dir.resolve())
+        gpu_source, gpu_source_note = self._byo_gpu_note(job)
+        result["gpu_source"] = gpu_source
+        if gpu_source_note:
+            result["gpu_source_note"] = gpu_source_note
         return result
 
     def reevaluate(
