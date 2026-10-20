@@ -115,6 +115,22 @@ exactly-checkable outcomes at each stage).
   count in the computation graph (fewer sequential matmuls vs standard
   LoRA) is a fair structural proxy to record here, wall-clock is not.
 
+**Day 1 result (done — see `research/zflora_prototype/README.md` for full
+detail)**: pass gate met — both standard LoRA and the zFLoRA
+reconstruction train on the tiny CPU model, gradients reach only adapter
+params, loss decreases. Bonus finding worth carrying forward: on a
+synthetic task requiring new cross-position attention routing on a
+*randomly-initialized* base (`pair-sum`), the reconstruction plateaus well
+below standard LoRA (val_acc 0.08 vs 0.30) because its adapters attach at
+`Wo` and the FFN, never at `q_proj`/`k_proj` — it can reshape per-token
+output but can't change what attention attends to. On a purely pointwise
+task (`increment`), it **matches or beats** standard LoRA using under half
+the trainable params (val_acc 0.928 vs 0.926 at 768 vs 1,792 params).
+Working hypothesis: Qwen3-VL's base is pretrained, not random, so skill
+fine-tuning may look more like `increment` (bias existing attention) than
+`pair-sum` (learn routing from scratch) — Day 2 should test this directly
+rather than assume it.
+
 ### Day 2 — Quality sanity check on a small real checkpoint
 
 - Repeat the Day 1 setup on a small *real* pretrained checkpoint (e.g. a
@@ -185,6 +201,11 @@ Only after Day 4 confirms a real win. Two options, pick based on what Day
 
 ## Open questions / risks (keep current)
 
+- **New, from Day 1**: the reconstruction cannot learn new attention
+  routing (only `Wo`/FFN are adapted, never `q_proj`/`k_proj`) and this
+  shows up as a real accuracy ceiling on a randomly-initialized base for
+  tasks that need it. Unconfirmed whether this matters on a *pretrained*
+  Qwen3-VL base doing skill fine-tuning — Day 2's top priority.
 - Exact per-projection wiring inside the FFN block (forward adapter on
   the gate projection vs the down projection) isn't fully recoverable
   from the paper's text extraction — Day 2's quality check is partly a
@@ -198,7 +219,7 @@ Only after Day 4 confirms a real win. Two options, pick based on what Day
 
 ## Status
 
-- [ ] Day 1 — small-model CPU prototype
+- [x] Day 1 — small-model CPU prototype
 - [ ] Day 2 — quality sanity check
 - [ ] Day 3 — port to Qwen3-VL backbone
 - [ ] Day 4 — latency measurement, go/no-go
