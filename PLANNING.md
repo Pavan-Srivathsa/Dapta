@@ -182,6 +182,14 @@ either an aux-channel caching mechanism or a different integration point.
   1, gradient checkpointing); dev-set accuracy roughly matches the
   already-shipped standard-LoRA `nda-intake` adapter.
 
+**Day 3 prep (done, pre-GPU)**: CPU review of `day3_qwen3vl.py` found
+that HF gradient checkpointing silently corrupts the hook-based zFLoRA
+gradients (fixed with explicit aux-carrying layer wrappers, verified exact
+vs no checkpointing), plus a transformers-5 chat-template crash and a
+truncation bug that dropped the assistant header. Script now scores dev
+accuracy with production's `score()`. Details in
+`research/zflora_prototype/README.md`. GPU run still pending.
+
 ### Day 4 — Measure real latency on Qwen3-VL (GPU, test pod)
 
 - Reproduce the paper's own methodology: TTFT and per-token latency at

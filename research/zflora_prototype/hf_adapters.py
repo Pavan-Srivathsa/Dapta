@@ -14,6 +14,7 @@ import math
 
 import torch
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 
 class HFLoRALinear(nn.Module):
@@ -42,11 +43,31 @@ def freeze_all(model: nn.Module) -> None:
         param.requires_grad_(False)
 
 
+def get_language_model(model: nn.Module) -> nn.Module:
+    """Qwen2/Llama: model.model has .layers directly. Qwen3-VL (and other
+    VL models wrapping a separate vision tower): model.model.language_model
+    has .layers, and model.model.visual is the frozen vision tower we are
+    deliberately not touching -- confirmed against
+    transformers/models/qwen3_vl/modeling_qwen3_vl.py on the training pod
+    (Qwen3VLModel.language_model = Qwen3VLTextModel._from_config(...)).
+    """
+    inner = model.model
+    if hasattr(inner, "language_model"):
+        return inner.language_model
+    return inner
+
+
+def get_hidden_size(model: nn.Module) -> int:
+    config = model.config
+    text_config = getattr(config, "text_config", None)
+    return text_config.hidden_size if text_config is not None else config.hidden_size
+
+
 def apply_standard_lora_hf(model: nn.Module, rank: int, alpha: int) -> nn.Module:
     """Attaches LoRA at q/k/v/o_proj, matching backend/dapta/train.py's
     default LORA_TARGET_MODULES for non-nda-intake skills."""
     freeze_all(model)
-    for layer in model.model.layers:
+    for layer in get_language_model(model).layers:
         attn = layer.self_attn
         attn.q_proj = HFLoRALinear(attn.q_proj, rank, alpha)
         attn.k_proj = HFLoRALinear(attn.k_proj, rank, alpha)
@@ -55,13 +76,54 @@ def apply_standard_lora_hf(model: nn.Module, rank: int, alpha: int) -> nn.Module
     return model
 
 
+class _AuxCarryingLayer(nn.Module):
+    """Wraps one decoder layer so the aux channel enters and leaves it as
+    explicit tensors instead of only through ZFLoRAHookWrapper._aux.
+
+    Why this exists (Day 3 finding): HF's own gradient checkpointing
+    re-runs each layer's forward during backward. The o_proj/mlp hooks
+    read and mutate the shared self._aux, so on that re-run they saw
+    whatever aux the *last* layer left behind, and every adapter except
+    final_merge got silently wrong gradients (measured 87%-550% off on
+    Qwen2.5-0.5B, no error raised). Here, `run` resets owner._aux from
+    its own argument before calling the layer, so a recompute under
+    non-reentrant checkpointing replays exactly the original forward,
+    and autograd sees aux as a real input/output of the layer.
+    """
+
+    def __init__(self, layer: nn.Module, owner: "ZFLoRAHookWrapper", index: int) -> None:
+        super().__init__()
+        self.layer = layer
+        self.index = index
+        # Plain attribute, not a submodule: owner already contains us.
+        object.__setattr__(self, "_owner", owner)
+        if hasattr(layer, "attention_type"):
+            self.attention_type = layer.attention_type
+
+    def forward(self, hidden_states: torch.Tensor, *args, **kwargs):
+        owner = self._owner
+        aux = owner.initial_expand(hidden_states) if self.index == 0 else owner._aux
+
+        def run(h, a, *run_args, **run_kwargs):
+            owner._aux = a
+            out = self.layer(h, *run_args, **run_kwargs)
+            return out, owner._aux
+
+        if owner.checkpoint_layers and self.training and torch.is_grad_enabled():
+            out, aux = checkpoint(run, hidden_states, aux, *args, use_reentrant=False, **kwargs)
+        else:
+            out, aux = run(hidden_states, aux, *args, **kwargs)
+        owner._aux = aux
+        return out
+
+
 class ZFLoRAHookWrapper(nn.Module):
     """Reconstructed zFLoRA (see zflora.py's docstring for the full
     rationale) implemented via forward hooks on an unmodified HF model,
     instead of reimplementing the decoder layer. Hook points:
 
-      - pre-hook on layers[0]: captures the embedded input, seeds the aux
-        channel via initial_expand.
+      - layer 0's _AuxCarryingLayer: captures the embedded input, seeds
+        the aux channel via initial_expand.
       - forward hook on each layer's self_attn.o_proj: adds
         backward_adapters[i](aux) into the attention output, in parallel
         with Wo (same as zflora.py's `x + attn_main + backward(...)`).
@@ -71,18 +133,27 @@ class ZFLoRAHookWrapper(nn.Module):
       - pre-hook on lm_head: injects final_merge(aux) into the final
         hidden state before logits are computed.
 
-    self._aux is reset at the start of every forward() call by the
-    layers[0] pre-hook, so this is safe for sequential (non-overlapping)
-    forward calls -- exactly what a normal train/eval loop does.
+    self._aux is reset at the start of every forward() call by layer 0,
+    so this is safe for sequential (non-overlapping) forward calls --
+    exactly what a normal train/eval loop does.
+
+    Do NOT enable HF's model.gradient_checkpointing_enable() on the base;
+    pass checkpoint_layers=True instead (see _AuxCarryingLayer for why).
     """
 
-    def __init__(self, model: nn.Module, aux_dim: int) -> None:
+    def __init__(self, model: nn.Module, aux_dim: int, checkpoint_layers: bool = False) -> None:
         super().__init__()
+        if getattr(model, "is_gradient_checkpointing", False):
+            raise ValueError(
+                "HF gradient checkpointing corrupts zFLoRA adapter gradients; "
+                "leave it off and pass checkpoint_layers=True instead."
+            )
         freeze_all(model)
         self.model = model
         self.aux_dim = aux_dim
-        hidden_size = model.config.hidden_size
-        num_layers = len(model.model.layers)
+        self.checkpoint_layers = checkpoint_layers
+        hidden_size = get_hidden_size(model)
+        num_layers = len(get_language_model(model).layers)
 
         self.initial_expand = nn.Linear(hidden_size, aux_dim, bias=False)
         nn.init.normal_(self.initial_expand.weight, std=0.02)
@@ -103,13 +174,7 @@ class ZFLoRAHookWrapper(nn.Module):
         self._register_hooks()
 
     def _register_hooks(self) -> None:
-        layers = self.model.model.layers
-
-        def seed_aux(_module, args):
-            hidden_states = args[0]
-            self._aux = self.initial_expand(hidden_states)
-
-        layers[0].register_forward_pre_hook(seed_aux)
+        layers = get_language_model(self.model).layers
 
         for i, layer in enumerate(layers):
             def backward_hook(_module, _input, output, i=i):
@@ -122,6 +187,9 @@ class ZFLoRAHookWrapper(nn.Module):
                 self._aux = self._aux + self.forward_adapters[i](ffn_input)
 
             layer.mlp.register_forward_pre_hook(forward_hook)
+
+        for i in range(len(layers)):
+            layers[i] = _AuxCarryingLayer(layers[i], self, i)
 
         def merge_hook(_module, args):
             hidden_states = args[0]

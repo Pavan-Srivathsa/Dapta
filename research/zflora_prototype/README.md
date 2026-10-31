@@ -104,3 +104,42 @@ here.
 **Pass gate status**: met, and the specific question Day 1 flagged is
 answered: real pretrained base, no measurable accuracy gap, at 1/3 the
 adapter parameters.
+
+## Day 3 prep: bugs found before spending GPU time (`day3_qwen3vl.py`)
+
+Reviewed and CPU-smoke-tested the Day 3 script against Qwen2.5-0.5B
+(same chat template family) before any pod run. Three real bugs, all
+fixed:
+
+1. **HF gradient checkpointing silently corrupts zFLoRA gradients.** The
+   production QLoRA envelope enables `model.gradient_checkpointing_enable()`,
+   which re-runs each decoder layer during backward. The o_proj/mlp hooks
+   read and mutate the shared `self._aux`, so on that re-run they saw the
+   aux left behind by the *last* layer. Measured on Qwen2.5-0.5B: every
+   adapter except `final_merge` got gradients 87%-550% off, no error, no
+   `None` grads -- the run would have looked like it was training. Fix:
+   `_AuxCarryingLayer` wraps each decoder layer so aux is an explicit
+   input/output under non-reentrant checkpointing
+   (`ZFLoRAHookWrapper(..., checkpoint_layers=True)`); the wrapper now
+   refuses a base with HF checkpointing on. Verified: identical logits and
+   0.0 relative gradient difference vs no checkpointing across all 50
+   adapter tensors. Day 2 re-run after the change: still 1.000 / 1.000.
+2. **`apply_chat_template(tokenize=True)` returns a BatchEncoding on
+   transformers 5.x**, not a list, so prompt building would have crashed
+   (or, wrapped in `list()`, produced 2-token prompts). Now renders text
+   then tokenizes, which works on 4.x and 5.x.
+3. **Truncation sliced the templated ids**, dropping `<|im_end|>` and the
+   assistant header. Now truncates the NDA text (which comes last in the
+   user turn) and re-templates.
+
+Also added, because the PLANNING.md gate is dev *accuracy* not loss:
+greedy-generation eval scored by `backend/dapta/factory_gpu.py`'s own
+`score()` (field F1 / exact form), a first-step check that every trainable
+tensor gets a gradient, peak-memory reporting, micro-batch 1 (matches the
+runbook), and results written to `day3_results.json`.
+
+Note for reading Day 3 numbers: at the default `--max-prompt-tokens 3072`,
+20 of 25 dev NDAs are truncated, and dates/signature blocks often sit at
+the end. LoRA-vs-zFLoRA is still a fair head-to-head, but it is not
+comparable to the shipped adapter's 70.75% field F1 (test split, 6144
+tokens) unless run with `--max-prompt-tokens 6144`.
